@@ -1,102 +1,74 @@
-# OS-backed thread-local storage
+# ps-thread-local-no-std
 
-This crate provides a `ThreadLocal` type as an alternative to
-`std::thread_local!` that allows per-object thread-local storage, while
-providing a similar API. It always uses the thread-local storage primitives
-provided by the OS.
+`ThreadLocal<T>`, per object, without linking `std`.
 
-On Unix systems, pthread-based thread-local storage is used.
+A fork of [`os-thread-local`](https://crates.io/crates/os-thread-local) 0.1.3 by
+Mike Hommey, dual licensed Apache-2.0/MIT, unchanged except for five lines. The
+upstream crate was already built entirely on OS primitives; it just said `std`
+in three places where it meant `core` and `alloc`.
 
-On Windows, fiber-local storage is used. This acts like thread-local
-storage when fibers are unused, but also provides per-fiber values
-after fibers are created with e.g. `winapi::um::winbase::CreateFiber`.
+## Why this exists
 
-The [`thread_local`](https://crates.io/crates/thread_local) crate is an example
-of another crate that provides per-object thread-local storage, with a
-different API, and different features, but with more performance overhead than
-this one.
+The same eighty lines of `pthread_key_create` plumbing had been hand-rolled
+twice in this house, in `parking_lot_lite_hack_core` and in `ps-reclaim`, with
+`WorkTablesIndex` about to make it three. Each copy is a separate place to get
+key racing, destructor registration and teardown-time failure wrong. This is one
+copy, with somebody else's 1.16 million downloads behind it.
 
-# Examples
-
-This is the same as the example in the [`std::thread::LocalKey`] documentation,
-but adjusted to use `ThreadLocal` instead. To use it in a `static` context, a
-lazy initializer, such as [`once_cell::sync::Lazy`] or [`lazy_static!`] is
-required.
-
-  [`std::thread::LocalKey`]: https://doc.rust-lang.org/std/thread/struct.LocalKey.html
-  [`once_cell::sync::Lazy`]: https://docs.rs/once_cell/1.2.0/once_cell/sync/struct.Lazy.html
-  [`lazy_static!`]: https://docs.rs/lazy_static/1.4.0/lazy_static/
+## What changed from upstream
 
 ```rust
-use std::cell::RefCell;
-use std::thread;
-use once_cell::sync::Lazy;
-use os_thread_local::ThreadLocal;
-
-static FOO: Lazy<ThreadLocal<RefCell<u32>>> =
-    Lazy::new(|| ThreadLocal::new(|| RefCell::new(1)));
-
-FOO.with(|f| {
-    assert_eq!(*f.borrow(), 1);
-    *f.borrow_mut() = 2;
-});
-
-// each thread starts out with the initial value of 1
-let t = thread::spawn(move || {
-    FOO.with(|f| {
-        assert_eq!(*f.borrow(), 1);
-        *f.borrow_mut() = 3;
-    });
-});
-
-// wait for the thread to complete and bail out on panic
-t.join().unwrap();
-
-// we retain our original value of 2 despite the child thread
-FOO.with(|f| {
-    assert_eq!(*f.borrow(), 2);
-});
+#![cfg_attr(not(test), no_std)]     // added
+extern crate alloc;                 // added
+use core::error::Error;             // was std::error::Error
+use alloc::boxed::Box;              // was std::boxed::Box
 ```
 
-A variation of the same with scoped threads and per-object thread-local
-storage:
+plus the crate name in five doctests. Nothing else. The `pthread` and
+`FlsAlloc` code, the destructor handling, the tests and the documentation are
+upstream's, and a diff against `os-thread-local` 0.1.3 should stay this short so
+that upstream fixes remain trivial to carry across.
 
-```rust
-use std::cell::RefCell;
-use crossbeam_utils::thread::scope;
-use os_thread_local::ThreadLocal;
+`not(test)` rather than a bare `no_std` because the test module wants threads and
+channels. Gating it off would have left the `no_std` build as the one nobody
+tests; this way `cargo test` links `std` for the harness while the crate's own
+code stays on `core` plus `alloc`.
 
-struct Foo {
-    data: u32,
-    tls: ThreadLocal<RefCell<u32>>,
-}
+`core::error::Error` is stable since 1.81, which is the crate's floor.
 
-let foo = Foo {
-    data: 0,
-    tls: ThreadLocal::new(|| RefCell::new(1)),
-};
+## Yes, a crate wrapping libc is `no_std`
 
-foo.tls.with(|f| {
-    assert_eq!(*f.borrow(), 1);
-    *f.borrow_mut() = 2;
-});
+`libc` is a bindings crate and is `#![no_std]` with `default-features = false`,
+which is how it is depended on here. `no_std` means "does not link the Rust
+standard library", not "makes no calls into C". The `dep:libc` here resolves to
+symbols the platform's libc already exports into every process on these targets.
 
-scope(|s| {
-    // each thread starts out with the initial value of 1
-    let foo2 = &foo;
-    let t = s.spawn(move |_| {
-        foo2.tls.with(|f| {
-            assert_eq!(*f.borrow(), 1);
-            *f.borrow_mut() = 3;
-        });
-    });
+Going below it is a real option and a different project. `pthread_key_create` is
+not a syscall, it is userspace bookkeeping in libc, so there is no `syscall`
+instruction that replaces this file. The thing underneath is the thread pointer
+itself: `%fs` on x86-64, `TPIDR_EL0` on aarch64, a `PT_TLS` segment and `TPOFF64`
+relocations, set up by whoever loaded the program. Amos Wenger's
+[part 13](https://fasterthanli.me/series/making-our-own-executable-packer/part-13)
+walks through doing exactly that, and it is the loader's job, not a library's.
+On macOS it is not available at all: Apple's syscall numbers are not a stable
+interface and `libSystem` is the only supported entry point.
 
-    // wait for the thread to complete and bail out on panic
-    t.join().unwrap();
+## Alternatives considered
 
-    // we retain our original value of 2 despite the child thread
-    foo.tls.with(|f| {
-        assert_eq!(*f.borrow(), 2);
-    });
-}).unwrap();
-```
+| crate | why not |
+|---|---|
+| `std::thread_local!` | the thing being replaced; it is a `std` macro |
+| [`thread_local`](https://crates.io/crates/thread_local) | not `no_std`, and keyed on `std::thread::current().id()` |
+| [`lazy_thread_local`](https://crates.io/crates/lazy_thread_local) | genuinely `no_std` already, and the closest call. 4,882 total downloads, last release March 2024, MIT only where the house is dual, and it carries lazy-init machinery we do not need |
+| `#[thread_local]` | still unstable, and it does not run destructors even on nightly |
+| hand-rolling it again | what this crate exists to stop |
+
+The measurement that says the mechanism does not matter much is in
+`ps-reclaim/src/tls.rs`: on Mach-O, `std`'s thread-local is itself a call through
+a TLV descriptor, and `thread_local!` against `pthread_getspecific` is 1.17 to
+1.71 ns against 1.36 to 1.41 ns, with the null moving 0.5 ns on a bad round.
+Pick on maintainability, not on speed.
+
+## Licence
+
+Apache-2.0 OR MIT, upstream's, retained with upstream's copyright.

@@ -25,11 +25,18 @@
 //! different features, but with more performance overhead than this one.
 
 #![deny(missing_docs)]
+// `not(test)` rather than a plain `no_std`: the test module below wants threads
+// and channels, and gating it off would mean the no_std build is the one that
+// never gets tested. This way `cargo test` links std for the harness while the
+// crate's own code stays on core plus alloc.
+#![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::error::Error;
 use core::fmt;
 use core::ptr::NonNull;
-use std::boxed::Box;
-use std::error::Error;
 
 #[cfg(windows)]
 mod oskey {
@@ -136,7 +143,7 @@ use oskey::c_void;
 /// use std::cell::RefCell;
 /// use std::thread;
 /// use once_cell::sync::Lazy;
-/// use os_thread_local::ThreadLocal;
+/// use ps_thread_local_no_std::ThreadLocal;
 ///
 /// static FOO: Lazy<ThreadLocal<RefCell<u32>>> =
 ///     Lazy::new(|| ThreadLocal::new(|| RefCell::new(1)));
@@ -169,7 +176,7 @@ use oskey::c_void;
 /// ```rust
 /// use std::cell::RefCell;
 /// use crossbeam_utils::thread::scope;
-/// use os_thread_local::ThreadLocal;
+/// use ps_thread_local_no_std::ThreadLocal;
 ///
 /// struct Foo {
 ///     data: u32,
@@ -287,7 +294,7 @@ impl<T> ThreadLocal<T> {
     /// each thread.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     ///
     /// let tls = ThreadLocal::new(|| 42);
     /// ```
@@ -304,7 +311,7 @@ impl<T> ThreadLocal<T> {
     /// yet.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
@@ -331,7 +338,7 @@ impl<T> ThreadLocal<T> {
     /// `AccessError`.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
