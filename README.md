@@ -39,7 +39,13 @@ code stays on `core` plus `alloc`.
 ## Yes, a crate wrapping libc is `no_std`
 
 `libc` is a bindings crate and is `#![no_std]` with `default-features = false`,
-which is how it is depended on here. `no_std` means "does not link the Rust
+which is how it is depended on here. On musl specifically it is fine, with one
+limit worth knowing: musl defines `PTHREAD_KEYS_MAX` as **128** where glibc
+allows 1024, and this crate takes one key per `ThreadLocal` object rather than
+one per program. `ThreadLocal::new` asserts on `pthread_key_create` failing, so
+a program that creates thousands of these on musl panics rather than degrades.
+For a handful of long-lived statics, which is what this exists for, 128 is not a
+ceiling anyone reaches. `no_std` means "does not link the Rust
 standard library", not "makes no calls into C". The `dep:libc` here resolves to
 symbols the platform's libc already exports into every process on these targets.
 
@@ -63,11 +69,42 @@ interface and `libSystem` is the only supported entry point.
 | `#[thread_local]` | still unstable, and it does not run destructors even on nightly |
 | hand-rolling it again | what this crate exists to stop |
 
-The measurement that says the mechanism does not matter much is in
-`ps-reclaim/src/tls.rs`: on Mach-O, `std`'s thread-local is itself a call through
-a TLV descriptor, and `thread_local!` against `pthread_getspecific` is 1.17 to
-1.71 ns against 1.36 to 1.41 ns, with the null moving 0.5 ns on a bad round.
-Pick on maintainability, not on speed.
+## What it costs
+
+There is a hit. It is about half a nanosecond per access on this machine, and
+you should know why before deciding whether that matters.
+
+Twenty million accesses per arm, three rounds, aarch64 `apple-darwin`, every arm
+behind `#[inline(never)]`, with arm A repeated as the null:
+
+```text
+      A const   B lazy   C static   D local   N const again
+ r1     1.36     1.26     1.74      2.00        1.23
+ r2     1.24     1.27     1.76      1.98        1.24
+ r3     1.25     1.25     1.72      1.99        1.24
+```
+
+A is `thread_local!` with `const` init, B the same with a destructor and a lazy
+flag, C this crate behind a `OnceLock` which is how a `static` would really use
+it, D this crate through a reference passed in. **Roughly 1.25 ns against 1.74,
+so about 0.5 ns or 40%.** Both are a call on Mach-O; `pthread_getspecific` does
+more inside it than the TLV thunk, and `try_with` adds a `NonNull` check and a
+guard comparison on top.
+
+**The `#[inline(never)]` is the whole measurement.** Without it LLVM hoists the
+TLV descriptor call out of the loop, because the address does not change, and
+cannot do the same for an opaque `pthread_getspecific`. That version of this
+benchmark reported `thread_local!` at 0.25 ns and a 5x win, which is one call
+amortised over fifty million iterations and not an access cost at all.
+
+**Not measured on Linux, and that is where the gap should be widest.** ELF
+local-exec makes a `const`-initialised `thread_local!` a register read plus an
+offset, with no call at all, while `pthread_getspecific` stays a call. Expect
+worse than 40% there and measure before relying on this number.
+
+For the caller this scales with the count of thread-locals on the path, not with
+anything else: four of them on a pin path is four lookups, so about 2 ns added.
+Folding several into one struct wins back more than the mechanism costs.
 
 ## Licence
 
