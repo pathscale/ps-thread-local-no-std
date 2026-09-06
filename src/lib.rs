@@ -25,11 +25,18 @@
 //! different features, but with more performance overhead than this one.
 
 #![deny(missing_docs)]
+// `not(test)` rather than a plain `no_std`: the test module below wants threads
+// and channels, and gating it off would mean the no_std build is the one that
+// never gets tested. This way `cargo test` links std for the harness while the
+// crate's own code stays on core plus alloc.
+#![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::error::Error;
 use core::fmt;
 use core::ptr::NonNull;
-use std::boxed::Box;
-use std::error::Error;
 
 #[cfg(windows)]
 mod oskey {
@@ -73,9 +80,23 @@ mod oskey {
     #[inline]
     pub(crate) unsafe fn create(dtor: Option<unsafe extern "system" fn(*mut c_void)>) -> Key {
         let mut key = MaybeUninit::uninit();
+        // One key per `ThreadLocal`, out of a process-wide budget that is 128
+        // on musl, 512 on macOS and 1024 on glibc, shared with libc itself and
+        // every other library in the image. Exhaustion is EAGAIN, and the
+        // default assertion message for it says nothing at all.
+        // The signature says `extern "system"` so one declaration serves both
+        // platforms; on unix that is `extern "C"`, so this transmute is a
+        // no-op that only changes the ABI label. Annotated because clippy
+        // rejects a bare one, and rightly: the target type is the whole point.
+        type Sys = Option<unsafe extern "system" fn(*mut c_void)>;
+        type C = Option<unsafe extern "C" fn(*mut c_void)>;
+        let rc = libc::pthread_key_create(key.as_mut_ptr(), mem::transmute::<Sys, C>(dtor));
         assert_eq!(
-            libc::pthread_key_create(key.as_mut_ptr(), mem::transmute(dtor)),
-            0
+            rc, 0,
+            "pthread_key_create failed with {rc}; the process is out of \
+             thread-local keys. Each ThreadLocal takes one for its whole life, \
+             and the budget is 128 on musl. Share one ThreadLocal holding a \
+             struct rather than creating many."
         );
         key.assume_init()
     }
@@ -136,7 +157,7 @@ use oskey::c_void;
 /// use std::cell::RefCell;
 /// use std::thread;
 /// use once_cell::sync::Lazy;
-/// use os_thread_local::ThreadLocal;
+/// use ps_thread_local_no_std::ThreadLocal;
 ///
 /// static FOO: Lazy<ThreadLocal<RefCell<u32>>> =
 ///     Lazy::new(|| ThreadLocal::new(|| RefCell::new(1)));
@@ -169,7 +190,7 @@ use oskey::c_void;
 /// ```rust
 /// use std::cell::RefCell;
 /// use crossbeam_utils::thread::scope;
-/// use os_thread_local::ThreadLocal;
+/// use ps_thread_local_no_std::ThreadLocal;
 ///
 /// struct Foo {
 ///     data: u32,
@@ -287,7 +308,7 @@ impl<T> ThreadLocal<T> {
     /// each thread.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     ///
     /// let tls = ThreadLocal::new(|| 42);
     /// ```
@@ -304,7 +325,7 @@ impl<T> ThreadLocal<T> {
     /// yet.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
@@ -331,7 +352,7 @@ impl<T> ThreadLocal<T> {
     /// `AccessError`.
     ///
     /// ```rust
-    /// use os_thread_local::ThreadLocal;
+    /// use ps_thread_local_no_std::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
@@ -374,7 +395,19 @@ impl<T> Drop for ThreadLocal<T> {
     }
 }
 
+// Upstream's tests, and the `allow`s are deliberate. Most of these were copied
+// from the Rust code-base in 2019 and predate the lints; rewriting them is the
+// change most likely to quietly alter what is being tested, which is the one
+// thing a fork must not do. New code in this crate gets no such exemption:
+// `-D warnings` still applies everywhere else.
 #[cfg(test)]
+#[allow(
+    clippy::bool_assert_comparison,
+    clippy::ok_expect,
+    clippy::redundant_closure,
+    clippy::type_complexity,
+    static_mut_refs
+)]
 pub(crate) mod tests {
     use super::ThreadLocal;
     use core::cell::{Cell, UnsafeCell};
@@ -622,6 +655,7 @@ pub(crate) mod tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure, clippy::type_complexity)]
 mod dynamic_tests {
     use super::tests::LOCK;
     use super::ThreadLocal;
