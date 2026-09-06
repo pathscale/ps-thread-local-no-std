@@ -80,9 +80,17 @@ mod oskey {
     #[inline]
     pub(crate) unsafe fn create(dtor: Option<unsafe extern "system" fn(*mut c_void)>) -> Key {
         let mut key = MaybeUninit::uninit();
+        // One key per `ThreadLocal`, out of a process-wide budget that is 128
+        // on musl, 512 on macOS and 1024 on glibc, shared with libc itself and
+        // every other library in the image. Exhaustion is EAGAIN, and the
+        // default assertion message for it says nothing at all.
+        let rc = libc::pthread_key_create(key.as_mut_ptr(), mem::transmute(dtor));
         assert_eq!(
-            libc::pthread_key_create(key.as_mut_ptr(), mem::transmute(dtor)),
-            0
+            rc, 0,
+            "pthread_key_create failed with {rc}; the process is out of \
+             thread-local keys. Each ThreadLocal takes one for its whole life, \
+             and the budget is 128 on musl. Share one ThreadLocal holding a \
+             struct rather than creating many."
         );
         key.assume_init()
     }

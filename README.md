@@ -45,7 +45,18 @@ allows 1024, and this crate takes one key per `ThreadLocal` object rather than
 one per program. `ThreadLocal::new` asserts on `pthread_key_create` failing, so
 a program that creates thousands of these on musl panics rather than degrades.
 For a handful of long-lived statics, which is what this exists for, 128 is not a
-ceiling anyone reaches. `no_std` means "does not link the Rust
+ceiling anyone reaches.
+
+Capping ourselves at 128 to match musl was considered and rejected. It does not
+make glibc safe, it makes glibc fail earlier to match the worst platform, and it
+does not even buy consistency: musl's 128 is a process-wide budget shared with
+libc and every other library, so an internal count reaching 127 says nothing
+about whether a key is left. If per-object thread-locals ever need to scale, the
+answer is the one `thread_local` and `seize` use, a single key holding a
+per-thread table indexed by object id, which costs one indirection and makes the
+platform limit irrelevant. Nothing in this house needs it: every consumer holds
+its keys in `static`s, four of them in `ps-reclaim` and one in
+`parking_lot_lite_hack_core`. `no_std` means "does not link the Rust
 standard library", not "makes no calls into C". The `dep:libc` here resolves to
 symbols the platform's libc already exports into every process on these targets.
 
@@ -91,11 +102,39 @@ so about 0.5 ns or 40%.** Both are a call on Mach-O; `pthread_getspecific` does
 more inside it than the TLV thunk, and `try_with` adds a `NonNull` check and a
 guard comparison on top.
 
-**The `#[inline(never)]` is the whole measurement.** Without it LLVM hoists the
-TLV descriptor call out of the loop, because the address does not change, and
-cannot do the same for an opaque `pthread_getspecific`. That version of this
-benchmark reported `thread_local!` at 0.25 ns and a 5x win, which is one call
-amortised over fifty million iterations and not an access cost at all.
+**Those numbers are the floor, not the answer.** The `#[inline(never)]` forbids
+an optimisation that `thread_local!` legitimately gets and this crate can never
+get, so it measures the two mechanisms at their most similar. Without it the
+same benchmark reports `thread_local!` at 0.25 ns and a 5x win, and that is
+**not** an artifact to be waved away. Compile a loop that increments one
+`thread_local!` and LLVM deletes the loop:
+
+```asm
+blr  x9              ; one TLV resolve
+ldr  x10, [x0]
+add  x0, x10, x8     ; + n, closed form
+str  x0, [x9]
+```
+
+Compile the same loop through this crate and every iteration survives, because
+`pthread_getspecific` is an opaque extern call the optimiser has to assume can
+do anything:
+
+```asm
+24: mov  x0, x20
+28: bl   <pthread_getspecific>   ; every iteration
+64: cmp  x21, #0x1               ; guard compare
+6c: ldr  x8, [x21]
+70: add  x0, x8, #0x1
+78: subs x19, x19, #0x1
+7c: b.ne 0x24                    ; the loop survives
+```
+
+So `thread_local!` is transparent to the optimiser and this crate is a barrier
+to it. For scattered single accesses that costs the 40% above. For repeated
+access in a loop it is unbounded. **The mitigation is free: put the loop inside
+`with()` rather than `with()` inside the loop**, which is one lookup either way
+and is how the hot paths in this house already use it.
 
 **Not measured on Linux, and that is where the gap should be widest.** ELF
 local-exec makes a `const`-initialised `thread_local!` a register read plus an
