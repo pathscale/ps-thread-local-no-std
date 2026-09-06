@@ -1,22 +1,22 @@
 [package]
-name = "ps-thread-local-no-std"
-version = "0.1.0"
+name = "os-thread-local"
+version = "0.1.3"
 authors = ["Mike Hommey <mh@glandium.org>"]
-license = "Apache-2.0 OR MIT"
+license = "Apache-2.0/MIT"
 edition = "2018"
-rust-version = "1.81"
-description = """OS-backed thread-local storage, without std.
+description = """OS-backed thread-local storage.
 
-A fork of os-thread-local 0.1.3 with no_std support: `core::error::Error` and
-`alloc::boxed::Box` in place of their std spellings, and nothing else. Provides
-a `ThreadLocal` type as an alternative to `std::thread_local!` that allows
-per-object thread-local storage with a similar API, always using the
-thread-local storage primitives provided by the OS.
+This crate provides a `ThreadLocal` type as an alternative to
+`std::thread_local!` that allows per-object thread-local storage, while
+providing a similar API. It always uses the thread-local storage primitives
+provided by the OS.
 """
-repository = "https://github.com/pathscale/ps-thread-local-no-std"
+repository = "https://github.com/glandium/os-thread-local"
 readme = "README.md"
-keywords = ["os", "thread-local", "no-std", "tls"]
-categories = ["no-std", "concurrency"]
+keywords = ["os"]
+
+[badges.travis-ci]
+repository = "glandium/os-thread-local"
 
 [target.'cfg(not(windows))'.dependencies.libc]
 version = "0.2"

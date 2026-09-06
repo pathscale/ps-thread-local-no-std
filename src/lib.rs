@@ -25,18 +25,11 @@
 //! different features, but with more performance overhead than this one.
 
 #![deny(missing_docs)]
-// `not(test)` rather than a plain `no_std`: the test module below wants threads
-// and channels, and gating it off would mean the no_std build is the one that
-// never gets tested. This way `cargo test` links std for the harness while the
-// crate's own code stays on core plus alloc.
-#![cfg_attr(not(test), no_std)]
 
-extern crate alloc;
-
-use alloc::boxed::Box;
-use core::error::Error;
 use core::fmt;
 use core::ptr::NonNull;
+use std::boxed::Box;
+use std::error::Error;
 
 #[cfg(windows)]
 mod oskey {
@@ -80,17 +73,9 @@ mod oskey {
     #[inline]
     pub(crate) unsafe fn create(dtor: Option<unsafe extern "system" fn(*mut c_void)>) -> Key {
         let mut key = MaybeUninit::uninit();
-        // One key per `ThreadLocal`, out of a process-wide budget that is 128
-        // on musl, 512 on macOS and 1024 on glibc, shared with libc itself and
-        // every other library in the image. Exhaustion is EAGAIN, and the
-        // default assertion message for it says nothing at all.
-        let rc = libc::pthread_key_create(key.as_mut_ptr(), mem::transmute(dtor));
         assert_eq!(
-            rc, 0,
-            "pthread_key_create failed with {rc}; the process is out of \
-             thread-local keys. Each ThreadLocal takes one for its whole life, \
-             and the budget is 128 on musl. Share one ThreadLocal holding a \
-             struct rather than creating many."
+            libc::pthread_key_create(key.as_mut_ptr(), mem::transmute(dtor)),
+            0
         );
         key.assume_init()
     }
@@ -151,7 +136,7 @@ use oskey::c_void;
 /// use std::cell::RefCell;
 /// use std::thread;
 /// use once_cell::sync::Lazy;
-/// use ps_thread_local_no_std::ThreadLocal;
+/// use os_thread_local::ThreadLocal;
 ///
 /// static FOO: Lazy<ThreadLocal<RefCell<u32>>> =
 ///     Lazy::new(|| ThreadLocal::new(|| RefCell::new(1)));
@@ -184,7 +169,7 @@ use oskey::c_void;
 /// ```rust
 /// use std::cell::RefCell;
 /// use crossbeam_utils::thread::scope;
-/// use ps_thread_local_no_std::ThreadLocal;
+/// use os_thread_local::ThreadLocal;
 ///
 /// struct Foo {
 ///     data: u32,
@@ -302,7 +287,7 @@ impl<T> ThreadLocal<T> {
     /// each thread.
     ///
     /// ```rust
-    /// use ps_thread_local_no_std::ThreadLocal;
+    /// use os_thread_local::ThreadLocal;
     ///
     /// let tls = ThreadLocal::new(|| 42);
     /// ```
@@ -319,7 +304,7 @@ impl<T> ThreadLocal<T> {
     /// yet.
     ///
     /// ```rust
-    /// use ps_thread_local_no_std::ThreadLocal;
+    /// use os_thread_local::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
@@ -346,7 +331,7 @@ impl<T> ThreadLocal<T> {
     /// `AccessError`.
     ///
     /// ```rust
-    /// use ps_thread_local_no_std::ThreadLocal;
+    /// use os_thread_local::ThreadLocal;
     /// use std::cell::Cell;
     ///
     /// let tls = ThreadLocal::new(|| Cell::new(42));
