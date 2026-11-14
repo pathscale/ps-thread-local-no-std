@@ -71,11 +71,53 @@ mod oskey {
 
 #[cfg(not(windows))]
 mod oskey {
+    use core::ffi::{c_int, c_uint, c_ulong};
     use core::mem::{self, MaybeUninit};
 
-    pub(crate) type Key = libc::pthread_key_t;
+    #[cfg(target_vendor = "apple")]
+    #[allow(non_camel_case_types)]
+    pub(crate) type pthread_key_t = c_ulong;
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "emscripten",
+        target_os = "l4re",
+        target_os = "aix",
+        target_os = "solaris",
+        target_os = "illumos",
+    ))]
+    #[allow(non_camel_case_types)]
+    pub(crate) type pthread_key_t = c_uint;
+
+    #[cfg(any(
+        target_os = "android",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "haiku",
+        target_os = "nto",
+    ))]
+    #[allow(non_camel_case_types)]
+    pub(crate) type pthread_key_t = c_int;
+
+    #[cfg(any(target_os = "redox", target_os = "cygwin"))]
+    #[allow(non_camel_case_types)]
+    pub(crate) type pthread_key_t = usize;
+
+    pub(crate) type Key = pthread_key_t;
     #[allow(non_camel_case_types)]
     pub(crate) type c_void = core::ffi::c_void;
+
+    extern "C" {
+        fn pthread_key_create(
+            key: *mut pthread_key_t,
+            dtor: Option<unsafe extern "C" fn(*mut c_void)>,
+        ) -> c_int;
+        fn pthread_setspecific(key: pthread_key_t, value: *const c_void) -> c_int;
+        fn pthread_getspecific(key: pthread_key_t) -> *mut c_void;
+        fn pthread_key_delete(key: pthread_key_t) -> c_int;
+    }
 
     #[inline]
     pub(crate) unsafe fn create(dtor: Option<unsafe extern "system" fn(*mut c_void)>) -> Key {
@@ -90,7 +132,7 @@ mod oskey {
         // rejects a bare one, and rightly: the target type is the whole point.
         type Sys = Option<unsafe extern "system" fn(*mut c_void)>;
         type C = Option<unsafe extern "C" fn(*mut c_void)>;
-        let rc = libc::pthread_key_create(key.as_mut_ptr(), mem::transmute::<Sys, C>(dtor));
+        let rc = pthread_key_create(key.as_mut_ptr(), mem::transmute::<Sys, C>(dtor));
         assert_eq!(
             rc, 0,
             "pthread_key_create failed with {rc}; the process is out of \
@@ -103,18 +145,18 @@ mod oskey {
 
     #[inline]
     pub(crate) unsafe fn set(key: Key, value: *mut c_void) {
-        let r = libc::pthread_setspecific(key, value);
+        let r = pthread_setspecific(key, value);
         debug_assert_eq!(r, 0);
     }
 
     #[inline]
     pub(crate) unsafe fn get(key: Key) -> *mut c_void {
-        libc::pthread_getspecific(key)
+        pthread_getspecific(key)
     }
 
     #[inline]
     pub(crate) unsafe fn destroy(key: Key) {
-        let r = libc::pthread_key_delete(key);
+        let r = pthread_key_delete(key);
         debug_assert_eq!(r, 0);
     }
 }
